@@ -1,0 +1,10 @@
+node_modules/
+.DS_Store
+
+# rendered output (rebuild with the npm scripts)
+*.mp4
+*.wav
+stills/
+
+# the tour's frame-by-frame recording (~180 MB; rebuild with `npm run tour:capture`)
+tour/

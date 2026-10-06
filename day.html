@@ -1,0 +1,1225 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>One Day with ActivityWatch</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;700&family=Varela+Round&display=block" rel="stylesheet">
+<style>
+  html, body { margin: 0; background: #0a0d12; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 56.25vw; max-height: 100vh; max-width: 177.78vh; margin: auto; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1920" height="1080"></canvas>
+<script src="shared.js"></script>
+<script>
+const DURATION = 60;
+// Cut to the score (day-music.js): 128 BPM, 32 bars of 1.875s. bt(bar, beat) is when that beat lands.
+const BEAT = 60 / 128;
+const bt = (bar, beat = 0) => (bar * 4 + beat) * BEAT;
+
+// Chapters: hook 0–4 · dawn 4–8 · the day 8–20 · insights 20–24 · private 24–26 · open 26–28 · logo 28–32 (bars)
+
+// ---------- the day ----------
+const APPS = {
+  code:  { name: 'VS Code',  cat: 'coding', icon: 'code' },
+  term:  { name: 'Terminal', cat: 'coding', icon: 'term' },
+  git:   { name: 'GitHub',   cat: 'coding', icon: 'git' },
+  web:   { name: 'Firefox',  cat: 'web',    icon: 'globe' },
+  slack: { name: 'Slack',    cat: 'comms',  icon: 'hash' },
+  mail:  { name: 'Mail',     cat: 'comms',  icon: 'mail' },
+  zoom:  { name: 'Zoom',     cat: 'comms',  icon: 'video' },
+  figma: { name: 'Figma',    cat: 'design', icon: 'shapes' },
+  yt:    { name: 'YouTube',  cat: 'media',  icon: 'play' },
+  music: { name: 'Spotify',  cat: 'media',  icon: 'note' },
+  afk:   { name: 'Away',     cat: 'afk',    icon: 'cup' },
+};
+const CATS = [
+  { key: 'coding', name: 'Coding',   color: C.coding },
+  { key: 'design', name: 'Design',   color: C.design },
+  { key: 'comms',  name: 'Comms',    color: C.comms },
+  { key: 'web',    name: 'Browsing', color: C.web },
+  { key: 'media',  name: 'Media',    color: C.media },
+];
+const CAT = Object.fromEntries(CATS.map(c => [c.key, c]));
+const AFK_C = '#3a4556';
+const catColor = k => k === 'afk' ? AFK_C : CAT[k].color;
+
+// 08:00 → 22:00 in 96 eighth notes (8.75 simulated minutes each): [eighths, app, window title, callout]
+const SCHEDULE = [
+  [3, 'mail', 'Inbox — 23 unread'], [2, 'slack', '#standup'], [2, 'web', 'Hacker News'],
+  [6, 'code', 'timeline.ts — aw-webui', 'Deep work'], [1, 'term', 'npm run build'], [3, 'code', 'timeline.ts — aw-webui'],
+  [1, 'web', 'docs.activitywatch.net'], [5, 'web', 'reddit.com/r/programming', '“Just checking” Reddit · {dur}'],
+  [3, 'figma', 'Onboarding flow v3'], [1, 'slack', '#design'], [3, 'figma', 'Onboarding flow v3'], [1, 'mail', 'Re: launch plan'],
+  [7, 'afk', 'Lunch', 'Lunch break · {dur}'], [1, 'slack', '#general'],
+  [3, 'zoom', 'Weekly sync', 'Meeting marathon'], [1, 'slack', '#standup'], [4, 'zoom', 'Design review'],
+  [1, 'afk', 'Coffee'], [12, 'code', 'sync.rs — aw-server-rust', 'Flow state · {focus}'], [1, 'term', 'cargo test'],
+  [2, 'code', 'sync.rs — aw-server-rust'], [3, 'git', 'Review: add sync support'], [2, 'slack', '#dev'], [2, 'mail', 'Inbox'],
+  [1, 'web', 'Hacker News'], [8, 'afk', 'Dinner', 'Offline for dinner'],
+  [6, 'yt', 'Just one more video', '“Just one more video”'], [2, 'music', 'Evening chill'],
+  [3, 'web', 'Wikipedia — History of timekeeping'], [2, 'yt', 'Just one more video'], [4, 'afk', 'Asleep'],
+];
+const STEP = 70 / 8, DAY_MIN = 14 * 60;
+const EVENTS = (() => {
+  let m = 0;
+  return SCHEDULE.map(([n, app, title, callout]) => {
+    const e = { app, title, callout, cat: APPS[app].cat, m0: m, m1: m + n * STEP };
+    m = e.m1;
+    return e;
+  });
+})();
+const FOCUS = (() => { // longest unbroken stretch of coding/design
+  let best = { m0: 0, m1: 0 }, run = null;
+  for (const e of EVENTS) {
+    if (e.cat === 'coding' || e.cat === 'design') { run = run || { m0: e.m0 }; run.m1 = e.m1; if (run.m1 - run.m0 > best.m1 - best.m0) best = { ...run }; }
+    else run = null;
+  }
+  return best;
+})();
+EVENTS.forEach(e => e.callout = e.callout && e.callout.replace('{dur}', fmtDur(e.m1 - e.m0)).replace('{focus}', fmtDur(FOCUS.m1 - FOCUS.m0)));
+const ACTIVE = EVENTS.filter(e => e.cat !== 'afk');
+const SWITCHES = ACTIVE.filter((e, i) => i > 0 && e.app !== ACTIVE[i - 1].app);
+const totals = m => {
+  const out = { active: 0, switches: SWITCHES.filter(e => e.m0 < m).length };
+  for (const c of CATS) out[c.key] = 0;
+  for (const e of ACTIVE) { const d = Math.max(0, Math.min(e.m1, m) - e.m0); out[e.cat] += d; out.active += d; }
+  return out;
+};
+const FINAL = totals(DAY_MIN);
+const clockStr = h => `${String(Math.floor(h) % 24).padStart(2, '0')}:${String(Math.floor((h % 1) * 60)).padStart(2, '0')}`;
+
+// Simulated time: the hook is at night, dawn runs 05:30–08:00, then the day races 08:00–22:00 over twelve bars.
+const DAY0 = bt(8), DAY1 = bt(20);
+const minuteAt = t => clamp((t - DAY0) / (DAY1 - DAY0)) * DAY_MIN;
+const timeOfMinute = m => DAY0 + m / DAY_MIN * (DAY1 - DAY0);
+function hourAt(t) {
+  if (t < bt(4)) return 4.5;
+  if (t < DAY0) return lerp(5.5, 8, easeOutCubic(prog(t, bt(4), DAY0)));
+  if (t < bt(28)) return 8 + minuteAt(t) / 60;
+  return lerp(22, 29.5, easeInOutCubic(prog(t, bt(28), bt(31)))); // the logo gets the next sunrise
+}
+
+// ---------- sky ----------
+const SKY = [
+  [0, '#04060c', '#090d1a'], [5, '#060913', '#12182c'], [6, '#0f1830', '#3a2c52'], [6.8, '#18264a', '#9a4f6a'],
+  [7.6, '#1b3356', '#d0805e'], [9, '#18385a', '#35657f'], [13, '#153859', '#2c6484'], [16.5, '#1b2d50', '#7c6070'],
+  [18.4, '#271f45', '#c96b4c'], [19.4, '#191632', '#57305a'], [20.8, '#080b17', '#131a2e'], [24, '#04060c', '#090d1a'],
+  [28.5, '#0b1226', '#2a2440'], [29.5, '#101a33', '#5a3654'],
+];
+const rgb = c => [1, 3, 5].map(i => parseInt(c.slice(i, i + 2), 16));
+const mix = (a, b, u) => { const x = rgb(a), y = rgb(b); return `rgb(${x.map((v, i) => Math.round(lerp(v, y[i], u))).join(',')})`; };
+function skyColors(h) {
+  let k = 0;
+  while (k < SKY.length - 2 && SKY[k + 1][0] <= h) k++;
+  const [h0, t0, b0] = SKY[k], [h1, t1, b1] = SKY[k + 1];
+  const u = easeInOutCubic(clamp((h - h0) / (h1 - h0)));
+  return [mix(t0, t1, u), mix(b0, b1, u)];
+}
+const STARS = (() => {
+  const r = rng(21);
+  return Array.from({ length: 170 }, () => ({ x: r() * W, y: r() * H * 0.78, s: 0.6 + r() * 1.8, ph: r() * 6.28, sp: 1 + r() * 3 }));
+})();
+
+function sky(t, h) {
+  const [top, bottom] = skyColors(h);
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, top);
+  g.addColorStop(1, bottom);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  // stars: born from the counter in the hook, fading with the dawn, back at night
+  let stars = Math.max(1 - prog(h, 5.6, 6.8), prog(h, 19.6, 21)) * (h > 25 ? 1 - prog(h, 27, 28.8) : 1);
+  if (t < bt(4, 2)) stars *= prog(t, bt(3, 3), bt(4, 2));
+  if (stars > 0) {
+    ctx.fillStyle = '#fff';
+    for (const s of STARS) {
+      ctx.globalAlpha = stars * (0.35 + 0.65 * (0.5 + 0.5 * Math.sin(t * s.sp + s.ph)));
+      ctx.fillRect(s.x, s.y, s.s, s.s);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // sun on its arc during the day (dawn places its own sun behind the laptop)
+  if (t >= DAY0 - 0.4 && h > 6.2 && h < 19.8) {
+    const u = (h - 6.2) / (19.8 - 6.2), arc = Math.sin(u * Math.PI);
+    sunDisc(lerp(470, 1450, u), 250 - arc * 170, 1 - arc * 0.6, prog(t, DAY0 - 0.4, DAY0 + 0.2) * clamp(arc * 4));
+  }
+  // moon
+  if (h > 19.4 && h < 26) {
+    const u = (h - 19.4) / 6, a = clamp(Math.sin(clamp(u) * Math.PI) * 3) * (1 - prog(t, bt(19, 3), bt(20)));
+    const mx = lerp(1420, 980, u), my = 250 - Math.sin(u * Math.PI) * 150;
+    ctx.save();
+    ctx.globalAlpha = a;
+    const glow = ctx.createRadialGradient(mx, my, 0, mx, my, 220);
+    glow.addColorStop(0, 'rgba(200,215,255,0.16)');
+    glow.addColorStop(1, 'rgba(200,215,255,0)');
+    ctx.fillStyle = glow;
+    ctx.fillRect(mx - 220, my - 220, 440, 440);
+    ctx.beginPath();
+    ctx.arc(mx, my, 34, 0, Math.PI * 2);
+    ctx.fillStyle = '#e8edf7';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(mx + 14, my - 9, 30, 0, Math.PI * 2);
+    ctx.fillStyle = top;
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function sunDisc(x, y, warm, a = 1) {
+  if (a <= 0) return;
+  ctx.save();
+  ctx.globalAlpha *= a;
+  const glow = ctx.createRadialGradient(x, y, 0, x, y, 520);
+  glow.addColorStop(0, `rgba(255,${Math.round(lerp(236, 170, warm))},${Math.round(lerp(190, 110, warm))},0.34)`);
+  glow.addColorStop(1, 'rgba(255,170,110,0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(x - 520, y - 520, 1040, 1040);
+  ctx.beginPath();
+  ctx.arc(x, y, 50, 0, Math.PI * 2);
+  ctx.fillStyle = mix('#fff4dc', '#ffb37a', warm);
+  ctx.fill();
+  ctx.restore();
+}
+
+// ---------- small helpers ----------
+function txt(str, x, y, size, color, { weight = 600, align = 'left', font = SANS, alpha = 1, spacing = 0, base = 'alphabetic' } = {}) {
+  if (alpha <= 0) return;
+  ctx.save();
+  ctx.globalAlpha *= alpha;
+  ctx.font = `${weight} ${size}px ${font}`;
+  ctx.fillStyle = color;
+  ctx.textAlign = align;
+  ctx.textBaseline = base;
+  if (spacing) ctx.letterSpacing = spacing + 'px';
+  ctx.fillText(str, x, y);
+  ctx.restore();
+}
+
+function panel(x, y, w, h, a = 1, r = 28) {
+  if (a <= 0) return;
+  ctx.save();
+  ctx.globalAlpha *= a;
+  rrect(x, y, w, h, r);
+  ctx.fillStyle = 'rgba(9,13,19,0.72)';
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+  ctx.stroke();
+  ctx.restore();
+}
+
+function fit(str, size, weight, maxW, font = SANS) {
+  ctx.font = `${weight} ${size}px ${font}`;
+  if (ctx.measureText(str).width <= maxW) return str;
+  while (str.length > 1 && ctx.measureText(str + '…').width > maxW) str = str.slice(0, -1);
+  return str + '…';
+}
+
+// Line icons drawn in a unit box centred on (x, y), s = box size.
+function icon(kind, x, y, s, color = '#fff') {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(s, s);
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = 0.075;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  const line = (...p) => { ctx.beginPath(); ctx.moveTo(p[0], p[1]); for (let i = 2; i < p.length; i += 2) ctx.lineTo(p[i], p[i + 1]); ctx.stroke(); };
+  const circle = (cx, cy, r, fill) => { ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); fill ? ctx.fill() : ctx.stroke(); };
+  switch (kind) {
+    case 'code': line(-0.18, -0.2, -0.36, 0, -0.18, 0.2); line(0.18, -0.2, 0.36, 0, 0.18, 0.2); line(0.07, -0.26, -0.07, 0.26); break;
+    case 'term': line(-0.3, -0.18, -0.12, 0, -0.3, 0.18); line(0.0, 0.2, 0.3, 0.2); break;
+    case 'git': circle(-0.2, -0.26, 0.08); circle(-0.2, 0.26, 0.08); circle(0.22, -0.1, 0.08); line(-0.2, -0.18, -0.2, 0.18);
+      ctx.beginPath(); ctx.moveTo(0.22, -0.02); ctx.quadraticCurveTo(0.22, 0.14, -0.14, 0.2); ctx.stroke(); break;
+    case 'globe': circle(0, 0, 0.32); ctx.beginPath(); ctx.ellipse(0, 0, 0.13, 0.32, 0, 0, Math.PI * 2); ctx.stroke(); line(-0.32, 0, 0.32, 0);
+      line(-0.27, -0.16, 0.27, -0.16); line(-0.27, 0.16, 0.27, 0.16); break;
+    case 'hash': line(-0.08, -0.3, -0.16, 0.3); line(0.16, -0.3, 0.08, 0.3); line(-0.28, -0.1, 0.3, -0.1); line(-0.3, 0.1, 0.28, 0.1); break;
+    case 'mail': rrect(-0.32, -0.22, 0.64, 0.44, 0.06); ctx.stroke(); line(-0.3, -0.18, 0, 0.05, 0.3, -0.18); break;
+    case 'video': rrect(-0.34, -0.2, 0.44, 0.4, 0.08); ctx.stroke(); line(0.14, -0.06, 0.34, -0.18, 0.34, 0.18, 0.14, 0.06); break;
+    case 'shapes': circle(-0.14, -0.12, 0.15); rrect(0.02, -0.02, 0.28, 0.28, 0.03); ctx.stroke(); line(-0.3, 0.3, -0.14, 0.02, 0.02, 0.3, -0.3, 0.3); break;
+    case 'play': ctx.beginPath(); ctx.moveTo(-0.14, -0.24); ctx.lineTo(0.26, 0); ctx.lineTo(-0.14, 0.24); ctx.closePath(); ctx.fill(); break;
+    case 'note': ctx.beginPath(); ctx.ellipse(-0.12, 0.2, 0.12, 0.09, -0.4, 0, Math.PI * 2); ctx.fill(); line(-0.01, 0.18, -0.01, -0.3, 0.22, -0.2); break;
+    case 'cup': rrect(-0.26, -0.08, 0.4, 0.34, 0.06); ctx.stroke(); ctx.beginPath(); ctx.arc(0.18, 0.08, 0.1, -Math.PI / 2, Math.PI / 2); ctx.stroke();
+      line(-0.14, -0.3, -0.12, -0.18); line(0.0, -0.3, 0.02, -0.18); break;
+    case 'moon': circle(0, 0, 0.28); ctx.clip(); ctx.beginPath(); ctx.arc(0, 0, 0.28, 0, Math.PI * 2); ctx.arc(0.13, -0.1, 0.24, 0, Math.PI * 2); ctx.fill('evenodd'); break;
+    case 'window': rrect(-0.34, -0.26, 0.68, 0.52, 0.06); ctx.stroke(); line(-0.34, -0.12, 0.34, -0.12); break;
+    case 'keys': rrect(-0.36, -0.2, 0.72, 0.4, 0.06); ctx.stroke();
+      for (let r = 0; r < 2; r++) for (let c = 0; c < 5; c++) circle(-0.24 + c * 0.12, -0.08 + r * 0.12, 0.022, true); line(-0.14, 0.12, 0.14, 0.12); break;
+    case 'plus': line(-0.2, 0, 0.2, 0); line(0, -0.2, 0, 0.2); break;
+  }
+  ctx.restore();
+}
+
+function appTile(app, x, y, size, scale = 1, title = '') {
+  const a = APPS[app];
+  ctx.save();
+  ctx.translate(x + size / 2, y + size / 2);
+  ctx.scale(scale, scale);
+  const col = catColor(a.cat);
+  const g = ctx.createLinearGradient(0, -size / 2, 0, size / 2);
+  g.addColorStop(0, col);
+  g.addColorStop(1, mix(a.cat === 'afk' ? '#3a4556' : col, '#000000', 0.35));
+  rrect(-size / 2, -size / 2, size, size, size * 0.24);
+  ctx.fillStyle = g;
+  ctx.fill();
+  const kind = a.cat === 'afk' ? (title === 'Asleep' || title === 'Dinner' ? 'moon' : 'cup') : a.icon;
+  icon(kind, 0, 0, size * 0.78);
+  ctx.restore();
+}
+
+// ---------- 1. hook: "86,400 seconds" ----------
+const CTR = (() => {
+  ctx.font = `800 230px ${SANS}`;
+  const dw = 150, cw = 64, x0 = W / 2 - (dw * 5 + cw) / 2;
+  const cells = [];
+  let x = x0;
+  '86,400'.split('').forEach(ch => { const comma = ch === ','; cells.push({ x, w: comma ? cw : dw, comma, digit: +ch }); x += comma ? cw : dw; });
+  return { cells, y: 640, size: 230 };
+})();
+
+// 86,400 ticks down a few seconds, then the whole day drains to zero by bar 3.
+function secondsLeft(t) {
+  const a = bt(2), b = bt(2, 2), c = bt(3);
+  if (t < a) return 86400;
+  if (t < b) { const x = (t - a) / (BEAT / 2), i = Math.floor(x); return 86400 - i - easeOutBack(x - i, 2.2); }
+  return 86396 * (1 - easeInOutCubic(prog(t, b, c)));
+}
+// Odometer column value: a digit only rolls while everything below it is carrying.
+function column(S, k) {
+  const P = Math.pow(10, 4 - k), low = S % P;
+  return Math.floor(S / P) + Math.max(0, low - (P - 1));
+}
+
+let DUST = null; // the zeros dissolve into stars; glyph points are sampled once the font is ready
+function dust() {
+  if (DUST) return DUST;
+  const oc = document.createElement('canvas');
+  oc.width = 200; oc.height = 260;
+  const o = oc.getContext('2d');
+  o.font = `800 ${CTR.size}px ${SANS}`;
+  o.fillStyle = '#fff';
+  o.textAlign = 'center';
+  o.fillText('0', 100, 230);
+  const img = o.getImageData(0, 0, 200, 260).data, pts = [];
+  for (let y = 0; y < 260; y += 5) for (let x = 0; x < 200; x += 5) if (img[(y * 200 + x) * 4 + 3] > 150) pts.push([x - 100, y - 230]);
+  const r = rng(11);
+  DUST = [];
+  for (const cell of CTR.cells) {
+    if (cell.comma) continue;
+    for (const [px, py] of pts) {
+      const star = STARS[Math.floor(r() * STARS.length)];
+      DUST.push({ x: cell.x + cell.w / 2 + px, y: CTR.y + py, star, d: r() * 0.45, a: r() * Math.PI * 2, k: r() });
+    }
+  }
+  return DUST;
+}
+
+function hook(t) {
+  if (t > bt(4, 2)) return;
+  const S = secondsLeft(t);
+  const linesOut = 1 - prog(t, bt(2, 2), bt(3));
+  revealText('Every day, you get', W / 2, 400, 58, C.dim, prog(t, bt(0, 1), bt(0, 3)) * linesOut, { weight: 600 });
+  revealText('seconds.', W / 2, 770, 58, C.dim, prog(t, bt(1), bt(1, 2)) * linesOut, { weight: 600 });
+
+  // a ring of 60 ticks that drains with the day
+  const ringIn = easeOutCubic(prog(t, bt(0, 2), bt(1, 2))), ringOut = 1 - prog(t, bt(3), bt(3, 2));
+  if (ringIn * ringOut > 0) {
+    const lit = S / 86400;
+    for (let i = 0; i < 60; i++) {
+      const ang = -Math.PI / 2 + i / 60 * Math.PI * 2, on = i / 60 < lit;
+      const r0 = 400, r1 = i % 5 === 0 ? 440 : 424;
+      ctx.save();
+      ctx.globalAlpha = ringIn * ringOut * (on ? 0.55 : 0.12) * clamp(ringIn * 60 - i);
+      ctx.strokeStyle = on ? C.accent : C.dim;
+      ctx.lineWidth = i % 5 === 0 ? 6 : 3;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(W / 2 + Math.cos(ang) * r0, 560 + Math.sin(ang) * r0);
+      ctx.lineTo(W / 2 + Math.cos(ang) * r1, 560 + Math.sin(ang) * r1);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // the odometer
+  const glyphA = 1 - prog(t, bt(3, 1), bt(3, 1.6));
+  if (glyphA > 0) {
+    ctx.save();
+    ctx.font = `800 ${CTR.size}px ${SANS}`;
+    ctx.textAlign = 'center';
+    const lineH = CTR.size * 0.92, zero = S < 0.5;
+    CTR.cells.forEach((cell, i) => {
+      const k = i > 1 ? i - 1 : i; // digit index, skipping the comma
+      const land = bt(0, 2) + k * BEAT / 2, p = prog(t, land - 0.55, land);
+      if (p <= 0) return;
+      ctx.save();
+      ctx.globalAlpha = glyphA * clamp(p * 3);
+      ctx.fillStyle = zero ? mix('#f3f6fa', '#2ee6a6', prog(t, bt(3), bt(3, 0.5))) : C.text;
+      if (cell.comma) { ctx.fillText(',', cell.x + cell.w / 2, CTR.y); ctx.restore(); return; }
+      ctx.beginPath();
+      ctx.rect(cell.x - 10, CTR.y - CTR.size * 0.86, cell.w + 20, CTR.size * 1.02);
+      ctx.clip();
+      const cAt = tt => tt < bt(2) ? cell.digit + (1 - easeOutCubic(prog(tt, land - 0.55, land))) * (8 + k * 3) : column(secondsLeft(tt), k);
+      const c = cAt(t), v = c - cAt(t - 1 / 30), base = ctx.globalAlpha;
+      const strip = (cv, alpha) => {
+        const n = Math.floor(cv), f = cv - n;
+        ctx.globalAlpha = alpha;
+        for (const [d, off] of [[n, -f], [n + 1, 1 - f]]) ctx.fillText(String(((d % 10) + 10) % 10), cell.x + cell.w / 2, CTR.y + off * lineH);
+      };
+      const blur = clamp((Math.abs(v) - 0.15) * 0.8, 0, 0.45);
+      if (blur > 0) { strip(c - v * 0.66, base * blur * 0.6); strip(c - v * 0.33, base * blur); }
+      strip(c, base);
+      ctx.restore();
+    });
+    ctx.restore();
+  }
+
+  // ...into stars
+  if (t > bt(3, 1)) {
+    ctx.save();
+    ctx.fillStyle = '#fff';
+    for (const p of dust()) {
+      const q = prog(t, bt(3, 1) + p.d, bt(3, 1) + p.d + 1.1 + p.k * 0.5);
+      if (q >= 1) continue;
+      const e = easeInOutCubic(q);
+      const cx = p.x + Math.cos(p.a) * 160, cy = p.y - 180 - p.k * 260;
+      const x = (1 - e) * (1 - e) * p.x + 2 * (1 - e) * e * cx + e * e * p.star.x;
+      const y = (1 - e) * (1 - e) * p.y + 2 * (1 - e) * e * cy + e * e * p.star.y;
+      ctx.globalAlpha = (q < 0.05 ? q * 20 : 1) * (1 - q * 0.5);
+      ctx.fillStyle = q < 0.3 ? mix('#2ee6a6', '#ffffff', q / 0.3) : '#fff';
+      const s = lerp(4, p.star.s, e);
+      ctx.fillRect(x - s / 2, y - s / 2, s, s);
+    }
+    ctx.restore();
+  }
+  const qOut = 1 - prog(t, bt(3, 2.5), bt(3, 3.5));
+  revealText('Where do they go?', W / 2, 820, 96, C.accent, prog(t, bt(3), bt(3, 1.5)) * qOut);
+}
+
+// ---------- 2. dawn: the laptop opens and ActivityWatch starts ----------
+const DESK = 792;
+// Front view of a laptop resting on the desk; open 0..1 lifts the lid. Returns the screen rect.
+function laptop(cx, baseY, sw, open, a = 1) {
+  const sh = sw * 0.62, lift = easeInOutCubic(open), hh = sh * lift, tw = sw * lerp(0.9, 1, lift);
+  ctx.save();
+  ctx.globalAlpha *= a;
+  // lid
+  ctx.beginPath();
+  ctx.moveTo(cx - sw / 2, baseY);
+  ctx.lineTo(cx - tw / 2, baseY - hh);
+  ctx.lineTo(cx + tw / 2, baseY - hh);
+  ctx.lineTo(cx + sw / 2, baseY);
+  ctx.closePath();
+  ctx.fillStyle = '#10151d';
+  ctx.fill();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = '#3b4656';
+  ctx.stroke();
+  // base
+  const bw = sw * 1.16;
+  rrect(cx - bw / 2, baseY - 2, bw, 20, 9);
+  const g = ctx.createLinearGradient(0, baseY, 0, baseY + 20);
+  g.addColorStop(0, '#4a5566');
+  g.addColorStop(1, '#1c222c');
+  ctx.fillStyle = g;
+  ctx.fill();
+  rrect(cx - 70, baseY - 2, 140, 8, 4);
+  ctx.fillStyle = '#10151d';
+  ctx.fill();
+  ctx.restore();
+  const inset = 16;
+  return { x: cx - sw / 2 + inset, y: baseY - sh + inset, w: sw - inset * 2, h: sh - inset * 2 - 6 };
+}
+
+function check(x, y, s, p) {
+  if (p <= 0) return;
+  ctx.save();
+  ctx.strokeStyle = C.accent;
+  ctx.lineWidth = s * 0.16;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  const pts = [[x, y], [x + s * 0.35, y + s * 0.35], [x + s, y - s * 0.4]];
+  const l1 = Math.hypot(s * 0.35, s * 0.35), l2 = Math.hypot(s * 0.65, s * 0.75), L = (l1 + l2) * easeOutCubic(p);
+  ctx.beginPath();
+  ctx.moveTo(...pts[0]);
+  if (L <= l1) ctx.lineTo(x + s * 0.35 * L / l1, y + s * 0.35 * L / l1);
+  else { ctx.lineTo(...pts[1]); const f = (L - l1) / l2; ctx.lineTo(x + s * 0.35 + s * 0.65 * f, y + s * 0.35 - s * 0.75 * f); }
+  ctx.stroke();
+  ctx.restore();
+}
+
+const BOOT = [
+  { at: bt(6), name: 'aw-server', note: 'localhost:5600' },
+  { at: bt(6, 2), name: 'aw-watcher-afk', note: 'keyboard & mouse activity' },
+  { at: bt(7), name: 'aw-watcher-window', note: 'active app & title' },
+  { at: bt(7, 2), name: 'aw-watcher-web', note: 'browser tabs' },
+];
+function bootLog(s, t) {
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(s.x, s.y, s.w, s.h);
+  ctx.clip();
+  const on = prog(t, bt(5, 2), bt(5, 3));
+  const g = ctx.createLinearGradient(0, s.y, 0, s.y + s.h);
+  g.addColorStop(0, mix('#05070b', '#15233a', on));
+  g.addColorStop(1, mix('#05070b', '#0c1420', on));
+  ctx.fillStyle = g;
+  ctx.fillRect(s.x, s.y, s.w, s.h);
+  const x = s.x + 48, y0 = s.y + 78, lh = 58;
+  const cmd = '$ aw-qt', typed = Math.floor(clamp(prog(t, bt(5, 3), bt(5, 3) + 0.35)) * cmd.length);
+  txt(cmd.slice(0, typed), x, y0, 30, C.text, { font: MONO, weight: 700, alpha: on });
+  if (typed < cmd.length || t < bt(6)) {
+    ctx.font = `700 30px ${MONO}`;
+    const cx = x + ctx.measureText(cmd.slice(0, typed)).width + 4;
+    if (Math.floor(t * 3) % 2 === 0) { ctx.fillStyle = C.accent; ctx.globalAlpha = on; ctx.fillRect(cx, y0 - 26, 16, 32); ctx.globalAlpha = 1; }
+  }
+  BOOT.forEach((b, i) => {
+    const p = prog(t, b.at, b.at + 0.25);
+    if (p <= 0) return;
+    const y = y0 + lh * (i + 1.25);
+    check(x + 4, y - 12, 22, p);
+    txt(b.name, x + 46, y, 28, C.text, { font: MONO, weight: 700, alpha: clamp(p * 2) });
+    txt(b.note, s.x + s.w - 44, y, 22, C.dim, { font: MONO, align: 'right', alpha: prog(t, b.at + 0.1, b.at + 0.4) });
+  });
+  txt('tracking — you can forget about it now', x, y0 + lh * 5.6, 24, C.accent, { font: MONO, alpha: prog(t, bt(7, 1.5), bt(7, 2)) });
+  ctx.restore();
+}
+
+function clockAndStatus(t, h, a) {
+  if (a <= 0) return;
+  txt(clockStr(h), 120, 178, 104, C.text, { font: MONO, weight: 700, alpha: a, spacing: -3 });
+  txt('Tuesday', 124, 224, 30, C.dim, { alpha: a });
+  const sp = prog(t, bt(6), bt(6, 1));
+  if (sp > 0) {
+    ctx.save();
+    ctx.globalAlpha = a * sp;
+    ctx.font = `600 26px ${SANS}`;
+    const label = 'ActivityWatch · tracking', w = ctx.measureText(label).width + 76;
+    rrect(1800 - w, 118, w, 54, 27);
+    ctx.fillStyle = 'rgba(9,13,19,0.72)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(46,230,166,0.35)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    const pulse = 0.5 + 0.5 * Math.sin(t * Math.PI * 2 / (BEAT * 2));
+    ctx.beginPath();
+    ctx.arc(1800 - w + 30, 145, 8 + pulse * 3, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(46,230,166,${0.25 + 0.2 * pulse})`;
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(1800 - w + 30, 145, 7, 0, Math.PI * 2);
+    ctx.fillStyle = C.accent;
+    ctx.fill();
+    ctx.fillStyle = C.text;
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, 1800 - w + 52, 146);
+    ctx.restore();
+  }
+}
+
+function dawn(t) {
+  if (t < bt(3, 3) || t > bt(8, 2)) return;
+  const zoomP = easeInCubic(prog(t, bt(7, 2.5), bt(8)));
+  const sceneA = 1 - prog(t, bt(7, 3.4), bt(8));
+  const tilt = (1 - easeOutCubic(prog(t, bt(3, 3), bt(4, 2)))) * 360;
+  ctx.save();
+  ctx.globalAlpha = sceneA;
+  ctx.translate(0, tilt);
+  // zoom through the screen into the day
+  const sx = W / 2, sy = DESK - 508 / 2 - 8;
+  ctx.translate(sx, sy);
+  ctx.scale(1 + zoomP * 2.4, 1 + zoomP * 2.4);
+  ctx.translate(-sx, -sy);
+
+  // the sun rises behind the laptop
+  const rise = easeOutCubic(prog(t, bt(4), bt(8)));
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(-W, -H, W * 3, DESK + H);
+  ctx.clip();
+  sunDisc(W / 2, lerp(DESK + 140, DESK - 330, rise), 1 - rise * 0.5, prog(t, bt(4), bt(4, 2)));
+  ctx.restore();
+  // desk
+  const dg = ctx.createLinearGradient(0, DESK, 0, H);
+  dg.addColorStop(0, '#171d27');
+  dg.addColorStop(1, '#07090d');
+  ctx.fillStyle = dg;
+  ctx.fillRect(-W, DESK, W * 3, H);
+  const edge = ctx.createLinearGradient(0, 0, W, 0);
+  edge.addColorStop(0, 'rgba(255,190,140,0)');
+  edge.addColorStop(0.5, `rgba(255,190,140,${0.35 * rise})`);
+  edge.addColorStop(1, 'rgba(255,190,140,0)');
+  ctx.fillStyle = edge;
+  ctx.fillRect(0, DESK, W, 2);
+
+  const open = prog(t, bt(4, 2), bt(5, 2));
+  const scr = laptop(W / 2, DESK, 820, open);
+  if (open >= 1) {
+    ctx.save();
+    ctx.globalAlpha *= 1 - prog(t, bt(7, 2.6), bt(7, 3.2)); // the log clears as we dive into the screen
+    bootLog(scr, t);
+    ctx.restore();
+    const fill = prog(t, bt(7, 2.6), bt(7, 3.2));
+    if (fill > 0) { ctx.fillStyle = `rgba(21,35,58,${fill})`; ctx.fillRect(scr.x, scr.y, scr.w, scr.h); }
+  }
+  ctx.restore();
+
+  const capA = sceneA * (1 - prog(t, bt(7, 2), bt(7, 3.5)));
+  ctx.save();
+  ctx.globalAlpha = capA;
+  revealText('ActivityWatch starts with your computer,', W / 2, 910, 46, C.text, prog(t, bt(5, 2), bt(5, 3.5)), { weight: 700 });
+  revealText('and quietly records the day as it happens.', W / 2, 972, 46, C.accent, prog(t, bt(6, 2), bt(6, 3.5)), { weight: 700 });
+  ctx.restore();
+}
+
+// ---------- 3. the day ----------
+const TL = { x0: 290, x1: 1760, win: 730, winH: 76, afk: 826, afkH: 24 };
+const PXM = (TL.x1 - TL.x0) / DAY_MIN;
+const tlx = m => TL.x0 + m * PXM;
+const eventAt = m => EVENTS.find(e => m >= e.m0 && m < e.m1) || EVENTS[EVENTS.length - 1];
+
+function nowCard(t, m, a) {
+  if (a <= 0) return;
+  panel(120, 262, 900, 330, a);
+  ctx.save();
+  ctx.globalAlpha *= a;
+  ctx.beginPath();
+  ctx.rect(120, 262, 900, 330);
+  ctx.clip();
+  txt('NOW', 160, 316, 24, C.dim, { weight: 700, spacing: 4 });
+  const i = EVENTS.indexOf(eventAt(m)), e = EVENTS[i];
+  txt(e.cat === 'afk' ? `away ${fmtDur(m - e.m0)}` : `for ${fmtDur(m - e.m0)}`, 980, 316, 26, C.dim, { align: 'right', font: MONO });
+  const q = i > 0 ? prog(t, timeOfMinute(e.m0), timeOfMinute(e.m0) + 0.3) : 1;
+  const draw = (ev, alpha, dy, pop) => {
+    if (alpha <= 0) return;
+    ctx.save();
+    ctx.globalAlpha *= alpha;
+    ctx.translate(0, dy);
+    appTile(ev.app, 160, 346, 150, pop, ev.title);
+    const name = ev.cat === 'afk' ? 'Away' : APPS[ev.app].name;
+    txt(name, 346, 420, 68, C.text, { weight: 800 });
+    txt(fit(ev.title, 34, 500, 620), 348, 470, 34, C.dim, { weight: 500 });
+    chipAt(348, 530, ev.cat === 'afk' ? 'AFK' : CAT[ev.cat].name, catColor(ev.cat), 0.8, 26);
+    ctx.restore();
+  };
+  const qa = clamp(q * 2), qb = clamp(q * 2 - 1);
+  if (qa < 1) draw(EVENTS[i - 1], 1 - qa, -40 * easeInCubic(qa), 1);
+  draw(e, qb, 40 * (1 - easeOutCubic(qb)), lerp(0.85, 1, easeOutBack(qb, 2.5)));
+  ctx.restore();
+}
+
+function todayPanel(t, m, a) {
+  if (a <= 0) return;
+  panel(1060, 262, 740, 330, a);
+  const T = totals(m);
+  ctx.save();
+  ctx.globalAlpha *= a;
+  txt('TODAY', 1100, 316, 24, C.dim, { weight: 700, spacing: 4 });
+  txt(fmtDur(T.active), 1100, 398, 70, C.text, { weight: 800 });
+  txt('active', 1106 + measure(fmtDur(T.active), 70, 800), 398, 28, C.dim);
+  txt(String(T.switches), 1760, 398, 56, C.text, { weight: 700, font: MONO, align: 'right' });
+  txt('switches', 1760, 316, 24, C.dim, { align: 'right' });
+  const maxC = Math.max(...CATS.map(c => FINAL[c.key]));
+  CATS.forEach((c, i) => {
+    const y = 448 + i * 30;
+    txt(c.name, 1100, y + 9, 22, C.dim, { weight: 600 });
+    rrect(1240, y - 2, 400, 12, 6);
+    ctx.fillStyle = 'rgba(255,255,255,0.06)';
+    ctx.fill();
+    if (T[c.key] > 0) {
+      rrect(1240, y - 2, Math.max(12, 400 * T[c.key] / maxC), 12, 6);
+      ctx.fillStyle = c.color;
+      ctx.fill();
+    }
+    txt(fmtDur(T[c.key]), 1760, y + 9, 22, C.text, { font: MONO, align: 'right', alpha: 0.85 });
+  });
+  ctx.restore();
+}
+// chip() centres itself; this pins its left edge instead.
+function chipAt(x, y, label, color, scale, size) {
+  ctx.font = `600 ${size}px ${SANS}`;
+  chip(x + (ctx.measureText(label).width + size * 2.6) * scale / 2, y, label, color, scale, 1, { size });
+}
+const measure = (s, size, weight = 600, font = SANS) => { ctx.font = `${weight} ${size}px ${font}`; return ctx.measureText(s).width; };
+
+function timelinePanel(t, m, a, morph = 0) {
+  if (a <= 0) return;
+  panel(120, 690, 1680, 250, a);
+  ctx.save();
+  ctx.globalAlpha *= a;
+  const rowsA = 1 - clamp(morph * 2);
+  txt('Window', 160, TL.win + 46, 24, C.dim, { alpha: rowsA });
+  txt('AFK', 160, TL.afk + 19, 24, C.dim, { alpha: rowsA });
+  // hour labels glide from tick positions to under the histogram columns
+  for (let h = 0; h <= 14; h++) {
+    const x = lerp(tlx(h * 60), colX(h) + COL_W / 2, easeInOutCubic(morph));
+    const la = h === 14 ? rowsA : 1;
+    txt(String(8 + h).padStart(2, '0'), x, lerp(906, 918, easeInOutCubic(morph)), 22, C.dim, { font: MONO, align: 'center', alpha: la * 0.9 });
+    if (rowsA > 0) { ctx.fillStyle = `rgba(255,255,255,${0.1 * rowsA})`; ctx.fillRect(tlx(h * 60) - 1, TL.win - 14, 2, 8); }
+  }
+  // AFK row: active in accent, away in grey
+  if (rowsA > 0) {
+    ctx.save();
+    ctx.globalAlpha *= rowsA;
+    rrect(TL.x0, TL.afk, TL.x1 - TL.x0, TL.afkH, 8);
+    ctx.fillStyle = 'rgba(255,255,255,0.04)';
+    ctx.fill();
+    ctx.clip();
+    for (const e of EVENTS) {
+      if (e.m0 >= m) break;
+      ctx.fillStyle = e.cat === 'afk' ? '#566276' : 'rgba(46,230,166,0.75)';
+      ctx.fillRect(tlx(e.m0), TL.afk, (Math.min(e.m1, m) - e.m0) * PXM, TL.afkH);
+    }
+    ctx.restore();
+  }
+  if (morph <= 0) {
+    rrect(TL.x0, TL.win, TL.x1 - TL.x0, TL.winH, 12);
+    ctx.fillStyle = 'rgba(255,255,255,0.04)';
+    ctx.fill();
+    for (const e of EVENTS) {
+      if (e.m0 >= m) break;
+      if (e.cat === 'afk') continue;
+      const w = (Math.min(e.m1, m) - e.m0) * PXM;
+      rrect(tlx(e.m0) + 1, TL.win, Math.max(0, w - 2), TL.winH, 6);
+      ctx.fillStyle = catColor(e.cat);
+      ctx.fill();
+    }
+  } else drawChunks(t);
+  // playhead
+  if (m > 0 && m < DAY_MIN) {
+    const x = tlx(m);
+    const g = ctx.createLinearGradient(x - 140, 0, x, 0);
+    g.addColorStop(0, 'rgba(255,255,255,0)');
+    g.addColorStop(1, 'rgba(255,255,255,0.16)');
+    ctx.fillStyle = g;
+    ctx.fillRect(x - 140, TL.win - 20, 140, TL.afk + TL.afkH - TL.win + 30);
+    ctx.fillStyle = C.text;
+    ctx.fillRect(x - 2, TL.win - 20, 4, TL.afk + TL.afkH - TL.win + 30);
+    const kick = Math.exp(-((t / BEAT) % 1) * 6);
+    ctx.beginPath();
+    ctx.arc(x, TL.win - 20, 8 + kick * 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(x, TL.win - 20, 14 + kick * 16, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,255,255,${0.18 * kick})`;
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function callouts(t, m, a) {
+  const list = EVENTS.filter(e => e.callout);
+  list.forEach((e, i) => {
+    const t0 = timeOfMinute(e.m0) + 0.05, t1 = i + 1 < list.length ? timeOfMinute(list[i + 1].m0) : DAY1;
+    const p = prog(t, t0, t0 + 0.35), out = prog(t, t1 - 0.3, t1);
+    if (p <= 0 || out >= 1) return;
+    const x0 = tlx(e.m0);
+    ctx.save();
+    ctx.globalAlpha *= a * clamp(p * 2) * (1 - out);
+    ctx.font = `700 28px ${SANS}`;
+    const w = ctx.measureText(e.callout).width + 64;
+    const x = clamp(x0, 140 + w / 2, 1780 - w / 2), y = 632 + (1 - easeOutBack(p, 2)) * 26;
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x0, y + 26);
+    ctx.lineTo(x0, TL.win - 4);
+    ctx.stroke();
+    rrect(x - w / 2, y - 26, w, 52, 26);
+    ctx.fillStyle = '#0e141d';
+    ctx.fill();
+    ctx.strokeStyle = catColor(e.cat);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(x - w / 2 + 26, y, 7, 0, Math.PI * 2);
+    ctx.fillStyle = catColor(e.cat) === AFK_C ? '#8b98a9' : catColor(e.cat);
+    ctx.fill();
+    ctx.fillStyle = C.text;
+    ctx.textBaseline = 'middle';
+    ctx.fillText(e.callout, x - w / 2 + 42, y + 1);
+    ctx.restore();
+  });
+}
+
+function day(t) {
+  if (t < bt(7, 3) || t >= bt(20, 0.6)) return;
+  const m = minuteAt(t);
+  const uiIn = easeOutCubic(prog(t, bt(7, 3.6), bt(8, 0.5)));
+  const panelsOut = easeInCubic(prog(t, bt(19, 3.5), bt(20, 0.5)));
+  const sc = lerp(1.08, 1, uiIn);
+  ctx.save();
+  ctx.translate(W / 2, H / 2);
+  ctx.scale(sc, sc);
+  ctx.translate(-W / 2, -H / 2);
+  if (t < bt(20)) timelinePanel(t, m, uiIn);
+  const a = uiIn * (1 - panelsOut);
+  ctx.save();
+  ctx.translate(0, -60 * panelsOut);
+  nowCard(t, m, a);
+  todayPanel(t, m, a);
+  ctx.restore();
+  callouts(t, m, a);
+  ctx.restore();
+}
+
+// ---------- 4. insights: the timeline folds into a histogram ----------
+const COL_W = 60 * PXM - 14, HIST_BASE = 886, HIST_PX = 2.9;
+const colX = h => tlx(h * 60) + 7;
+const CHUNKS = (() => {
+  const order = CATS.map(c => c.key), pieces = [], stack = Array(14).fill(0);
+  for (const e of ACTIVE) for (let h = 0; h < 14; h++) {
+    const a = Math.max(e.m0, h * 60), b = Math.min(e.m1, h * 60 + 60);
+    if (b > a) pieces.push({ cat: e.cat, h, a, b });
+  }
+  pieces.sort((p, q) => p.h - q.h || order.indexOf(p.cat) - order.indexOf(q.cat) || p.a - q.a);
+  for (const p of pieces) { p.off = stack[p.h]; stack[p.h] += p.b - p.a; }
+  return pieces;
+})();
+const morphAt = (t, h) => easeInOutCubic(prog(t, bt(20) + h * 0.035, bt(20) + h * 0.035 + 0.8));
+
+function drawChunks(t) {
+  const glow = prog(t, bt(22, 2), bt(22, 3)), fh = [Math.floor(FOCUS.m0 / 60), Math.floor((FOCUS.m1 - 1) / 60)];
+  for (const p of CHUNKS) {
+    const k = morphAt(t, p.h), d = p.b - p.a;
+    const x = lerp(tlx(p.a), colX(p.h), k), w = lerp(d * PXM, COL_W, k);
+    const y = lerp(TL.win, HIST_BASE - (p.off + d) * HIST_PX, k), h = lerp(TL.winH, d * HIST_PX, k);
+    rrect(x + 1, y + (k > 0.5 ? 1 : 0), Math.max(0, w - 2), Math.max(1, h - (k > 0.5 ? 2 : 0)), lerp(6, 4, k));
+    ctx.fillStyle = catColor(p.cat);
+    const dim = glow > 0 && (p.h < fh[0] || p.h > fh[1]) ? 1 - glow * 0.55 : 1;
+    ctx.globalAlpha = dim;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+}
+
+// Category (inner) and app (outer) sunburst, like the Activity view in aw-webui.
+const SUN = (() => {
+  const inner = [], outer = [];
+  let a = -Math.PI / 2;
+  for (const c of CATS) {
+    const span = FINAL[c.key] / FINAL.active * Math.PI * 2;
+    inner.push({ c: c.color, a0: a, a1: a + span });
+    const apps = {};
+    for (const e of ACTIVE) if (e.cat === c.key) apps[e.app] = (apps[e.app] || 0) + e.m1 - e.m0;
+    let b = a;
+    for (const [app, mins] of Object.entries(apps).sort((x, y) => y[1] - x[1])) {
+      const s = mins / FINAL.active * Math.PI * 2;
+      outer.push({ c: c.color, a0: b, a1: b + s, app });
+      b += s;
+    }
+    a += span;
+  }
+  return { inner, outer };
+})();
+
+function sunburst(t, cx, cy) {
+  const sweep = -Math.PI / 2 + easeInOutCubic(prog(t, bt(20, 2), bt(21, 2))) * Math.PI * 2;
+  const ring = (arcs, r0, r1, lighten) => {
+    for (const s of arcs) {
+      const end = Math.min(s.a1, sweep) - 0.012;
+      if (end <= s.a0 + 0.012) continue; // otherwise arc() would wrap the long way round
+      ctx.beginPath();
+      ctx.arc(cx, cy, r1, s.a0 + 0.012, end);
+      ctx.arc(cx, cy, r0, end, s.a0 + 0.012, true);
+      ctx.closePath();
+      ctx.fillStyle = lighten ? mix(s.c, '#ffffff', 0.25) : s.c;
+      ctx.fill();
+    }
+  };
+  ctx.save();
+  ctx.globalAlpha *= prog(t, bt(20, 2), bt(20, 3));
+  ring(SUN.inner, 92, 172, false);
+  ring(SUN.outer, 180, 232, true);
+  const cnt = easeInOutCubic(prog(t, bt(20, 2), bt(21, 2))); // counts with the sweep
+  txt(fmtDur(FINAL.active * cnt), cx, cy + 12, 44, C.text, { weight: 800, align: 'center' });
+  txt('active', cx, cy + 48, 24, C.dim, { align: 'center' });
+  ctx.restore();
+}
+
+function statCard(t, x, y, at, label, value, sub, hi) {
+  const p = prog(t, at, at + 0.4);
+  if (p <= 0) return;
+  ctx.save();
+  ctx.translate(x + 250, y + 90);
+  const s = lerp(0.8, 1, easeOutBack(p, 2.4));
+  ctx.scale(s, s);
+  ctx.translate(-x - 250, -y - 90);
+  ctx.globalAlpha *= clamp(p * 2);
+  panel(x, y, 500, 180, 1, 24);
+  if (hi > 0) { rrect(x, y, 500, 180, 24); ctx.strokeStyle = `rgba(46,230,166,${0.8 * hi})`; ctx.lineWidth = 3; ctx.stroke(); }
+  txt(label, x + 34, y + 52, 26, C.dim, { weight: 600 });
+  txt(value(easeOutCubic(prog(t, at, at + 1.2))), x + 32, y + 126, 68, C.text, { weight: 800 });
+  txt(sub, x + 34, y + 160, 22, C.dim, { weight: 500 });
+  ctx.restore();
+}
+
+function dashboard(t) {
+  revealText('See your day for what it really was.', W / 2, 150, 70, C.text, prog(t, bt(20, 1), bt(20, 2.5)));
+  sunburst(t, 420, 436);
+  const hi = prog(t, bt(22, 2), bt(22, 3));
+  const focus = `${clockStr(8 + FOCUS.m0 / 60)} – ${clockStr(8 + FOCUS.m1 / 60)}`;
+  statCard(t, 780, 226, bt(21), 'Active time', k => fmtDur(FINAL.active * k), 'tracked automatically', 0);
+  statCard(t, 1300, 226, bt(21, 1), 'Focused work', k => fmtDur((FINAL.coding + FINAL.design) * k), 'coding + design', 0);
+  statCard(t, 780, 430, bt(21, 2), 'Longest focus', k => fmtDur((FOCUS.m1 - FOCUS.m0) * k), focus, hi);
+  statCard(t, 1300, 430, bt(21, 3), 'Context switches', k => String(Math.round(SWITCHES.length * k)), 'app changes today', 0);
+  timelinePanel(t, DAY_MIN, 1, prog(t, bt(20), bt(20) + 1.3));
+  if (hi > 0) {
+    const x0 = colX(Math.floor(FOCUS.m0 / 60)), x1 = colX(Math.floor((FOCUS.m1 - 1) / 60)) + COL_W;
+    ctx.save();
+    ctx.globalAlpha = hi;
+    ctx.strokeStyle = C.accent;
+    ctx.lineWidth = 3;
+    ctx.setLineDash([10, 8]);
+    rrect(x0 - 8, 700, x1 - x0 + 16, 232, 16);
+    ctx.stroke();
+    ctx.restore();
+    txt('your most focused hours', (x0 + x1) / 2, 686, 24, C.accent, { weight: 700, align: 'center', alpha: hi });
+  }
+}
+
+function insights(t) {
+  if (t < bt(20) || t > bt(23, 3)) return; // after that, privacy() shrinks it into the laptop
+  dashboard(t);
+}
+
+// ---------- 5. private by design ----------
+const LAP = { cx: W / 2, base: 812, w: 760 };
+function privacy(t) {
+  if (t < bt(23, 3) || t > bt(26, 2)) return;
+  const shrink = easeInOutCubic(prog(t, bt(23, 3), bt(24, 1)));
+  const out = easeInCubic(prog(t, bt(25, 3), bt(26, 1)));
+  ctx.save();
+  ctx.globalAlpha = 1 - out;
+  // the dashboard shrinks into the laptop screen
+  const lapA = prog(t, bt(23, 3.5), bt(24, 0.5));
+  const scr = laptop(LAP.cx, LAP.base, LAP.w, 1, lapA);
+  ctx.save();
+  const k = lerp(1, scr.w / W, shrink), ox = lerp(0, scr.x, shrink), oy = lerp(0, scr.y + (scr.h - H * scr.w / W) / 2, shrink);
+  if (shrink > 0) {
+    ctx.beginPath();
+    ctx.rect(lerp(0, scr.x, shrink), lerp(0, scr.y, shrink), lerp(W, scr.w, shrink), lerp(H, scr.h, shrink));
+    ctx.clip();
+    ctx.fillStyle = `rgba(10,14,22,${shrink})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+  ctx.translate(ox, oy);
+  ctx.scale(k, k);
+  dashboard(t);
+  ctx.restore();
+
+  // the dome
+  const dp = easeOutBack(prog(t, bt(24, 1), bt(24, 3)), 1.2);
+  if (dp > 0) {
+    const R = 560 * dp, cx = LAP.cx, cy = LAP.base + 10;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, Math.PI, 0);
+    ctx.closePath();
+    const g = ctx.createRadialGradient(cx, cy, R * 0.55, cx, cy, R);
+    g.addColorStop(0, 'rgba(46,230,166,0)');
+    g.addColorStop(1, 'rgba(46,230,166,0.13)');
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.clip();
+    // hex lattice
+    ctx.strokeStyle = 'rgba(46,230,166,0.10)';
+    ctx.lineWidth = 1.5;
+    const s = 38;
+    for (let row = 0; row < 20; row++) for (let col = 0; col < 34; col++) {
+      const hx = cx - 17 * s * 1.5 + col * s * 1.5, hy = cy - row * s * 1.732 - (col % 2) * s * 0.866;
+      ctx.beginPath();
+      for (let v = 0; v < 6; v++) ctx.lineTo(hx + Math.cos(v * Math.PI / 3) * s * 0.96, hy + Math.sin(v * Math.PI / 3) * s * 0.96);
+      ctx.closePath();
+      ctx.stroke();
+    }
+    ctx.restore();
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, Math.PI, 0);
+    ctx.strokeStyle = 'rgba(46,230,166,0.85)';
+    ctx.lineWidth = 4;
+    ctx.stroke();
+    // your data, orbiting safely inside
+    const r = rng(5);
+    for (let i = 0; i < 26; i++) {
+      const rad = 300 + r() * 180, sp = 0.5 + r() * 0.6, ph = r() * 6.28, cat = CATS[i % 5];
+      const ang = Math.PI + ((t * sp + ph) % Math.PI);
+      ctx.beginPath();
+      ctx.arc(cx + Math.cos(ang) * rad * dp, cy + Math.sin(ang) * rad * 0.8 * dp - 40, 6, 0, Math.PI * 2);
+      ctx.fillStyle = cat.color;
+      ctx.globalAlpha = dp * (0.6 + 0.4 * Math.sin(t * 3 + i));
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+  }
+  // outside requests bounce off the dome
+  const THREATS = [
+    { x: 250, y: 330, at: bt(24, 3), label: 'cloud' },
+    { x: 1680, y: 300, at: bt(25, 0.5), label: 'trackers' },
+    { x: 1700, y: 690, at: bt(25, 2), label: 'ads' },
+  ];
+  for (const th of THREATS) {
+    const ap = prog(t, th.at - 0.5, th.at - 0.2);
+    if (ap <= 0) continue;
+    cloudIcon(th.x, th.y, 0.9, ap * 0.8);
+    txt(th.label, th.x, th.y + 76, 24, C.dim, { align: 'center', alpha: ap });
+    const cx = LAP.cx, cy = LAP.base + 10, dx = cx - th.x, dy = cy - 150 - th.y, L = Math.hypot(dx, dy);
+    // where the beam meets the dome
+    let hit = 0;
+    for (let s = 0; s < L; s += 4) { const px = th.x + dx * s / L, py = th.y + dy * s / L; if (Math.hypot(px - cx, py - cy) < 560) { hit = s; break; } }
+    const go = prog(t, th.at - 0.2, th.at), back = prog(t, th.at + 0.25, th.at + 0.6);
+    if (go > 0 && back < 1) {
+      ctx.save();
+      ctx.setLineDash([6, 14]);
+      ctx.lineDashOffset = -t * 160;
+      ctx.lineWidth = 5;
+      ctx.lineCap = 'round';
+      ctx.strokeStyle = C.media;
+      ctx.globalAlpha = 1 - back;
+      const e0 = hit * back, e1 = hit * easeOutCubic(go);
+      ctx.beginPath();
+      ctx.moveTo(th.x + dx * e0 / L, th.y + dy * e0 / L);
+      ctx.lineTo(th.x + dx * e1 / L, th.y + dy * e1 / L);
+      ctx.stroke();
+      ctx.restore();
+    }
+    const sp = prog(t, th.at, th.at + 0.45);
+    if (sp > 0 && sp < 1) {
+      const hx = th.x + dx * hit / L, hy = th.y + dy * hit / L;
+      ctx.save();
+      ctx.globalAlpha = 1 - sp;
+      ctx.strokeStyle = C.accent;
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.arc(hx, hy, 12 + easeOutCubic(sp) * 60, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+  ctx.restore();
+
+  ctx.save();
+  ctx.globalAlpha = 1 - out;
+  revealText('Your data stays on your device.', W / 2, 150, 72, C.text, prog(t, bt(24, 1), bt(24, 2.5)));
+  revealText('No account. No cloud. No one else sees it.', W / 2, 222, 40, C.accent, prog(t, bt(24, 3), bt(25)), { weight: 600 });
+  ctx.restore();
+}
+
+// ---------- 6. open source, made to be extended ----------
+const HUB = { x: 560, y: 590 };
+const WATCHERS = [
+  { name: 'aw-watcher-window', icon: 'window' }, { name: 'aw-watcher-afk', icon: 'keys' }, { name: 'aw-watcher-web', icon: 'globe' },
+  { name: 'aw-watcher-vscode', icon: 'code' }, { name: 'aw-watcher-input', icon: 'keys' }, { name: 'your own watcher', icon: 'plus', dashed: true },
+];
+const TERM = [
+  [{ s: '$ ', c: C.dim }, { s: 'curl localhost:5600/api/0/buckets/', c: C.text }],
+  [{ s: '{', c: C.dim }],
+  [{ s: '  "aw-watcher-window_laptop"', c: C.web }, { s: ': {…},', c: C.dim }],
+  [{ s: '  "aw-watcher-afk_laptop"', c: C.web }, { s: ': {…},', c: C.dim }],
+  [{ s: '  "aw-watcher-web-firefox_laptop"', c: C.web }, { s: ': {…}', c: C.dim }],
+  [{ s: '}', c: C.dim }],
+];
+
+function openSource(t) {
+  if (t < bt(25, 3) || t > bt(28, 1)) return;
+  const inA = prog(t, bt(26), bt(26, 1)), out = easeInCubic(prog(t, bt(27, 3), bt(28)));
+  ctx.save();
+  ctx.globalAlpha = inA * (1 - out);
+  revealText('Open source. Made to be extended.', W / 2, 150, 72, C.text, prog(t, bt(26, 0.5), bt(26, 2)));
+  revealText('Add watchers, query your data, build your own tools.', W / 2, 222, 40, C.accent, prog(t, bt(26, 2), bt(26, 3.5)), { weight: 600 });
+
+  // hub and spokes
+  WATCHERS.forEach((wt, i) => {
+    const ang = -Math.PI / 2 + i / WATCHERS.length * Math.PI * 2, at = bt(26, 1) + i * BEAT / 2;
+    const p = easeOutCubic(prog(t, at, at + 0.45));
+    if (p <= 0) return;
+    const nx = HUB.x + Math.cos(ang) * 290, ny = HUB.y + Math.sin(ang) * 250;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.lineWidth = 3;
+    if (wt.dashed) ctx.setLineDash([8, 10]);
+    ctx.beginPath();
+    ctx.moveTo(HUB.x, HUB.y);
+    ctx.lineTo(lerp(HUB.x, nx, p), lerp(HUB.y, ny, p));
+    ctx.stroke();
+    ctx.restore();
+    // events flowing in
+    if (p >= 1 && !wt.dashed) for (let k = 0; k < 3; k++) {
+      const f = ((t - at) * 0.9 + k / 3) % 1;
+      ctx.beginPath();
+      ctx.arc(lerp(nx, HUB.x, f), lerp(ny, HUB.y, f), 5, 0, Math.PI * 2);
+      ctx.fillStyle = [C.coding, C.web, C.comms, C.design, C.media][(i + k) % 5];
+      ctx.fill();
+    }
+    ctx.save();
+    ctx.translate(lerp(HUB.x, nx, p), lerp(HUB.y, ny, p));
+    ctx.scale(p, p);
+    ctx.beginPath();
+    ctx.arc(0, 0, 44, 0, Math.PI * 2);
+    ctx.fillStyle = '#121a24';
+    ctx.fill();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = wt.dashed ? C.accent : 'rgba(255,255,255,0.25)';
+    if (wt.dashed) ctx.setLineDash([6, 6]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    icon(wt.icon, 0, 0, 60, wt.dashed ? C.accent : C.text);
+    ctx.restore();
+    const below = Math.sin(ang) > 0.2, lx = nx, ly = below ? ny + 82 : ny - 62;
+    txt(wt.name, lx, ly, 22, wt.dashed ? C.accent : C.dim, { font: MONO, align: 'center', alpha: prog(t, at + 0.2, at + 0.5) });
+  });
+  const hp = easeOutBack(prog(t, bt(26), bt(26, 1)), 2);
+  if (hp > 0) {
+    ctx.save();
+    ctx.translate(HUB.x, HUB.y);
+    ctx.scale(hp, hp);
+    ctx.beginPath();
+    ctx.arc(0, 0, 96, 0, Math.PI * 2);
+    ctx.fillStyle = '#0e141d';
+    ctx.fill();
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = C.accent;
+    ctx.stroke();
+    ctx.restore();
+    drawLogo(HUB.x, HUB.y - 6, 58 * hp, -10, t);
+    txt('aw-server', HUB.x, HUB.y + 70, 22, C.accent, { font: MONO, weight: 700, align: 'center', alpha: hp });
+  }
+
+  // terminal
+  const tp = easeOutCubic(prog(t, bt(26, 1), bt(26, 2)));
+  if (tp > 0) {
+    const x = 1030, y = 330 + (1 - tp) * 40, w = 770, h = 420;
+    ctx.save();
+    ctx.globalAlpha *= tp;
+    panel(x, y, w, h, 1, 20);
+    ctx.fillStyle = 'rgba(255,255,255,0.04)';
+    rrect(x, y, w, 52, 20);
+    ctx.fill();
+    ['#ff5f57', '#febc2e', '#28c840'].forEach((c, i) => { ctx.beginPath(); ctx.arc(x + 32 + i * 26, y + 26, 8, 0, Math.PI * 2); ctx.fillStyle = c; ctx.fill(); });
+    txt('local REST API', x + w / 2, y + 34, 22, C.dim, { align: 'center', font: MONO });
+    const typedAt = bt(26, 2), full = TERM[0].map(s => s.s).join(''), n = Math.floor(clamp(prog(t, typedAt, typedAt + 0.9)) * full.length);
+    TERM.forEach((line, i) => {
+      const lineAt = i === 0 ? typedAt : typedAt + 1.0 + i * BEAT / 4;
+      if (t < lineAt) return;
+      let cx = x + 36, left = i === 0 ? n : Infinity;
+      for (const seg of line) {
+        const s = seg.s.slice(0, Math.max(0, left));
+        left -= seg.s.length;
+        txt(s, cx, y + 118 + i * 52, 26, seg.c, { font: MONO, weight: i === 0 ? 700 : 400 });
+        cx += measure(s, 26, i === 0 ? 700 : 400, MONO);
+      }
+    });
+    ctx.restore();
+  }
+
+  // platforms
+  ['Windows', 'macOS', 'Linux', 'Android', 'MPL-2.0'].forEach((label, i) => {
+    const p = prog(t, bt(27) + i * BEAT / 2, bt(27) + i * BEAT / 2 + 0.35);
+    if (p > 0) chip(W / 2 + (i - 2) * 250, 968, label, i === 4 ? C.web : C.accent, easeOutBack(p, 2.5) * 0.9, 1, { size: 26 });
+  });
+  ctx.restore();
+}
+
+// ---------- 7. logo: your time, your data ----------
+function outro(t) {
+  if (t < bt(27, 3)) return;
+  // iris wipe
+  const wp = prog(t, bt(27, 3), bt(28, 0.5));
+  if (wp > 0 && wp < 1) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(W / 2, H / 2, easeInOutCubic(wp) * 1150, 0, Math.PI * 2);
+    ctx.arc(W / 2, H / 2, easeInCubic(prog(t, bt(28), bt(28, 1))) * 1150, 0, Math.PI * 2, true);
+    ctx.fillStyle = C.accent;
+    ctx.fill();
+    ctx.restore();
+  }
+  const t0 = bt(28);
+  if (t < t0) return;
+  const slide = easeInOutCubic(prog(t, bt(29), bt(29, 2)));
+  const lx = lerp(W / 2, 560, slide), ly = H / 2 - 30, R = lerp(220, 170, slide);
+  ctx.save();
+  const zoom = 1 + (t - t0) * 0.01;
+  ctx.translate(W / 2, H / 2);
+  ctx.scale(zoom, zoom);
+  ctx.translate(-W / 2, -H / 2);
+  // a 24-hour dial around the logo
+  const dial = easeOutCubic(prog(t, bt(28, 1), bt(29)));
+  for (let i = 0; i < 24; i++) {
+    const ang = -Math.PI / 2 + i / 24 * Math.PI * 2 + t * 0.05;
+    const r0 = R * 1.28, r1 = R * (i % 6 === 0 ? 1.4 : 1.34);
+    ctx.save();
+    ctx.globalAlpha = dial * (i % 6 === 0 ? 0.5 : 0.22) * clamp(dial * 24 - i);
+    ctx.strokeStyle = C.accent;
+    ctx.lineWidth = 3;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(lx + Math.cos(ang) * r0, ly + Math.sin(ang) * r0);
+    ctx.lineTo(lx + Math.cos(ang) * r1, ly + Math.sin(ang) * r1);
+    ctx.stroke();
+    ctx.restore();
+  }
+  const gp = prog(t, t0 + 0.1, t0 + 1);
+  const g = ctx.createRadialGradient(lx, ly, 0, lx, ly, 460);
+  g.addColorStop(0, `rgba(46,230,166,${0.16 * gp})`);
+  g.addColorStop(1, 'rgba(46,230,166,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  drawLogo(lx, ly, R, t0, t);
+  if (t > bt(29, 1)) {
+    staggerText('ActivityWatch', 790, H / 2 - 20, 132, C.text, bt(29, 1.5), t, { font: ROUND, weight: 400, step: 0.03, dur: 0.45 });
+    revealText('Your time. Your data.', 796, H / 2 + 70, 60, C.accent, prog(t, bt(30), bt(30, 1.5)), { align: 'left', weight: 800 });
+    revealText('Free & open-source time tracking', 796, H / 2 + 130, 38, C.dim, prog(t, bt(30, 2), bt(30, 3)), { align: 'left', weight: 600 });
+    const up = prog(t, bt(30, 3), bt(31, 0.5));
+    if (up > 0) {
+      ctx.save();
+      ctx.globalAlpha = clamp(up * 2);
+      ctx.font = `700 38px ${SANS}`;
+      const label = 'activitywatch.net', tw = ctx.measureText(label).width, e = easeOutBack(up, 2);
+      const bx = 796, by = H / 2 + 166;
+      rrect(bx, by + (1 - e) * 20, (tw + 60) * e, 66, 33);
+      ctx.fillStyle = C.accent;
+      ctx.fill();
+      ctx.fillStyle = C.bg;
+      ctx.textBaseline = 'middle';
+      ctx.globalAlpha *= clamp((up - 0.4) * 3);
+      ctx.fillText(label, bx + 30, by + 35 + (1 - e) * 20);
+      ctx.restore();
+    }
+  }
+  ctx.restore();
+}
+
+// ---------- frame ----------
+const IMPACTS = [[bt(3), 6], [bt(20), 9], [bt(24, 2), 10], [bt(28), 8]];
+function render(t) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+  const h = hourAt(t);
+  sky(t, h);
+  // keep the day's sky from overpowering the UI
+  const calm = prog(t, bt(7, 3), bt(8, 0.5)) * (1 - prog(t, bt(28), bt(29)));
+  if (calm > 0) { ctx.fillStyle = `rgba(5,8,13,${0.3 * calm})`; ctx.fillRect(0, 0, W, H); }
+  const [dx, dy] = shake(t, IMPACTS);
+  ctx.save();
+  ctx.translate(dx, dy);
+  hook(t);
+  dawn(t);
+  if (t > bt(4) && t < bt(20, 0.5)) clockAndStatus(t, h, prog(t, bt(4), bt(4, 2)) * (1 - easeInCubic(prog(t, bt(19, 3.5), bt(20, 0.5)))));
+  day(t);
+  insights(t);
+  privacy(t);
+  openSource(t);
+  outro(t);
+  ctx.restore();
+  finish(t);
+}
+
+start(render, DURATION, ['800 40px Inter', '700 40px Inter', '600 40px Inter', '500 40px Inter', '400 40px "Varela Round"', '700 40px "JetBrains Mono"', '400 40px "JetBrains Mono"']);
+</script>
+</body>
+</html>

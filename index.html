@@ -1,0 +1,612 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>ActivityWatch Promo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800;900&family=Varela+Round&display=block" rel="stylesheet">
+<style>
+  html, body { margin: 0; background: #0a0d12; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 56.25vw; max-height: 100vh; max-width: 177.78vh; margin: auto; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1920" height="1080"></canvas>
+<script src="shared.js"></script>
+<script>
+const DURATION = 15;
+
+// ---------- data ----------
+const CATS = [
+  { key: 'coding', name: 'Coding',   color: C.coding, mins: 222 },
+  { key: 'web',    name: 'Browsing', color: C.web,    mins: 96 },
+  { key: 'comms',  name: 'Comms',    color: C.comms,  mins: 71 },
+  { key: 'design', name: 'Design',   color: C.design, mins: 58 },
+  { key: 'media',  name: 'Media',    color: C.media,  mins: 21 },
+];
+const CAT = Object.fromEntries(CATS.map(c => [c.key, c]));
+const TOTAL = CATS.reduce((s, c) => s + c.mins, 0);
+
+const APPS = [
+  { label: 'VS Code',  cat: 'coding' },
+  { label: 'Firefox',  cat: 'web' },
+  { label: 'Slack',    cat: 'comms' },
+  { label: 'YouTube',  cat: 'media' },
+  { label: 'Figma',    cat: 'design' },
+  { label: 'Terminal', cat: 'coding' },
+  { label: 'GitHub',   cat: 'web' },
+  { label: 'Zoom',     cat: 'comms' },
+  { label: 'Spotify',  cat: 'media' },
+  { label: 'Email',    cat: 'comms' },
+  { label: 'Docs',     cat: 'web' },
+  { label: 'Neovim',   cat: 'coding' },
+];
+
+// Timeline geometry + segments (deterministic)
+const TL = { x: 210, w: 1500, y: 560, h: 96 };
+const SEGMENTS = (() => {
+  const r = rng(7);
+  const order = ['coding','web','coding','comms','coding','design','web','media','coding','comms','design','coding','web','comms','coding','media','design','coding','web','comms','coding','design','web','coding'];
+  const raw = order.map(k => ({ cat: k, w: 0.4 + r() * 1.2 + (k === 'coding' ? 0.8 : 0) }));
+  const sum = raw.reduce((s, x) => s + x.w, 0);
+  let acc = 0;
+  return raw.map(s => { const seg = { cat: s.cat, x0: acc / sum, x1: (acc + s.w) / sum }; acc += s.w; return seg; });
+})();
+// AFK row: mostly active with a few breaks
+const AFK = [[0.18, 0.23], [0.46, 0.55], [0.79, 0.82]];
+
+// Chip scatter positions for scene 1
+const CHIPS = (() => {
+  const r = rng(42);
+  const spots = [
+    [300, 190], [1560, 170], [180, 520], [1720, 520], [360, 880], [1540, 880],
+    [760, 110], [1180, 120], [640, 960], [1250, 970], [120, 330], [1800, 740],
+  ];
+  return APPS.map((a, i) => {
+    const target = SEGMENTS.findIndex((s, j) => s.cat === a.cat && j >= i % 6 * 3) ;
+    const seg = SEGMENTS[target >= 0 ? target : 0];
+    return {
+      ...a, x: spots[i][0], y: spots[i][1],
+      phase: r() * Math.PI * 2, speed: 0.6 + r() * 0.8, rot: (r() - .5) * 0.25,
+      tx: TL.x + TL.w * (seg.x0 + seg.x1) / 2, ty: TL.y + TL.h / 2,
+      delay: 0.08 + i * 0.07,
+    };
+  });
+})();
+
+// ---------- background ----------
+function background(t) {
+  const g = ctx.createRadialGradient(W / 2, H * 0.45, 50, W / 2, H / 2, W * 0.75);
+  g.addColorStop(0, C.bg2);
+  g.addColorStop(1, C.bg);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  // drifting dot grid
+  ctx.save();
+  const off = (t * 18) % 60;
+  ctx.fillStyle = 'rgba(255,255,255,0.05)';
+  for (let y = -60; y < H + 60; y += 60)
+    for (let x = -60; x < W + 60; x += 60) {
+      ctx.fillRect(x + off, y + off * 0.5, 2, 2);
+    }
+  ctx.restore();
+
+  // big soft accent glow that travels between scenes
+  const gx = W / 2 + Math.sin(t * 0.6) * 380, gy = H / 2 + Math.cos(t * 0.45) * 160;
+  const glow = ctx.createRadialGradient(gx, gy, 0, gx, gy, 700);
+  glow.addColorStop(0, 'rgba(46,230,166,0.07)');
+  glow.addColorStop(1, 'rgba(46,230,166,0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, W, H);
+}
+
+// ---------- icons ----------
+function laptop(cx, cy, w, p, color) {
+  const h = w * 0.62;
+  ctx.save();
+  ctx.lineWidth = 8;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = color;
+  const per = (w + h) * 2;
+  ctx.setLineDash([per, per]);
+  ctx.lineDashOffset = per * (1 - p);
+  rrect(cx - w / 2, cy - h / 2, w, h, 22);
+  ctx.stroke();
+  const pb = easeOutCubic(prog(p, 0.6, 1));
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  const bw = w * 1.22 * pb;
+  ctx.moveTo(cx - bw / 2, cy + h / 2 + 30);
+  ctx.lineTo(cx + bw / 2, cy + h / 2 + 30);
+  ctx.lineWidth = 14;
+  ctx.stroke();
+  ctx.restore();
+  return h;
+}
+
+// ---------- scenes ----------
+// Scene 1 (0 – 3.1): "Where did your day go?" with scattered app chips
+function scene1(t) {
+  const out = easeInCubic(prog(t, 2.3, 2.8));
+  // headline
+  ctx.save();
+  const sc = 1 + out * 0.25 + t * 0.02;
+  ctx.translate(W / 2, H / 2);
+  ctx.scale(sc, sc);
+  ctx.translate(-W / 2, -H / 2);
+  ctx.globalAlpha = 1 - out;
+  revealText('Where did your', W / 2, 500, 132, C.text, prog(t, 0.25, 1.0));
+  revealText('day go?', W / 2, 650, 132, C.accent, prog(t, 0.55, 1.3));
+  ctx.restore();
+
+  // a clock hand whirling behind headline, fading
+  const hp = prog(t, 0, 2.8);
+  if (hp < 1) {
+    ctx.save();
+    ctx.globalAlpha = 0.10 * Math.sin(hp * Math.PI);
+    ctx.translate(W / 2, H / 2);
+    ctx.rotate(t * 5);
+    ctx.strokeStyle = C.text;
+    ctx.lineWidth = 18;
+    ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, -420); ctx.stroke();
+    ctx.rotate(-t * 4.4);
+    ctx.lineWidth = 26;
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, -260); ctx.stroke();
+    ctx.beginPath(); ctx.arc(0, 0, 470, 0, Math.PI * 2); ctx.lineWidth = 10; ctx.stroke();
+    ctx.restore();
+  }
+}
+
+// Chips: float in scene 1, then get sucked into the timeline (2.6 – 3.5)
+function chips(t) {
+  for (const c of CHIPS) {
+    const pin = prog(t, c.delay, c.delay + 0.55);
+    if (pin <= 0) continue;
+    const fly = prog(t, 2.3 + c.delay * 0.3, 3.0 + c.delay * 0.3);
+    if (fly >= 1) continue;
+    const fe = easeInOutCubic(fly);
+    const fx = c.x + Math.sin(t * c.speed + c.phase) * 22;
+    const fy = c.y + Math.cos(t * c.speed * 1.3 + c.phase) * 16;
+    // swirl while flying
+    const x = lerp(fx, c.tx, fe) + Math.sin(fly * Math.PI) * 120 * Math.cos(c.phase);
+    const y = lerp(fy, c.ty, fe);
+    const scale = easeOutBack(pin, 2.4) * lerp(1, 0.35, fe);
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(c.rot * (1 - fe) + Math.sin(t * c.speed + c.phase) * 0.04);
+    chip(0, 0, c.label, CAT[c.cat].color, scale, 1, { labelAlpha: 1 - fe });
+    ctx.restore();
+    // speed trail
+    if (fly > 0.05) {
+      ctx.save();
+      ctx.strokeStyle = CAT[c.cat].color;
+      ctx.globalAlpha = 0.5 * Math.sin(fly * Math.PI);
+      ctx.lineWidth = 6 * (1 - fe) + 2;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(lerp(x, fx, 0.35), lerp(y, fy, 0.35));
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+}
+
+// Scene 2 (3.0 – 6.6): timeline fills in behind a playhead
+function scene2(t) {
+  if (t < 2.9 || t > 7.2) return;
+  const out = prog(t, 6.2, 6.9);
+  const head = easeInOutCubic(prog(t, 3.0, 5.6));
+  const frameIn = easeOutCubic(prog(t, 2.9, 3.4));
+
+  // headline
+  ctx.save();
+  ctx.globalAlpha = 1 - easeInCubic(prog(t, 6.1, 6.5));
+  revealText('ActivityWatch tracks it', W / 2, 300, 92, C.text, prog(t, 3.25, 3.9));
+  revealText('automatically.', W / 2, 410, 92, C.accent, prog(t, 3.5, 4.2));
+  ctx.restore();
+
+  // track backgrounds
+  ctx.save();
+  ctx.globalAlpha = frameIn;
+  const labelA = 1 - out;
+  ctx.font = `600 26px ${SANS}`;
+  ctx.fillStyle = C.dim;
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  ctx.globalAlpha = frameIn * labelA;
+  ctx.fillText('Window', TL.x - 24, TL.y + TL.h / 2);
+  ctx.fillText('AFK', TL.x - 24, TL.y + TL.h + 58);
+  ctx.globalAlpha = frameIn * (1 - out);
+  rrect(TL.x, TL.y, TL.w, TL.h, 18);
+  ctx.fillStyle = 'rgba(255,255,255,0.04)';
+  ctx.fill();
+  rrect(TL.x, TL.y + TL.h + 40, TL.w, 36, 12);
+  ctx.fill();
+
+  // hour ticks
+  ctx.font = `600 24px ${SANS}`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  for (let i = 0; i <= 9; i++) {
+    const x = TL.x + TL.w * i / 9;
+    const p = prog(t, 3.0 + i * 0.05, 3.4 + i * 0.05);
+    ctx.globalAlpha = p * (1 - out) * 0.8;
+    ctx.fillStyle = C.dim;
+    ctx.fillText(`${String(9 + i).padStart(2, '0')}:00`, x, TL.y + TL.h + 100 + (1 - p) * 20);
+    ctx.fillRect(x - 1, TL.y - 18, 2, 10);
+  }
+  ctx.restore();
+
+  // segments (clipped to playhead), collapse into particles on exit
+  ctx.save();
+  rrect(TL.x, TL.y, TL.w, TL.h, 18);
+  ctx.clip();
+  SEGMENTS.forEach((s, i) => {
+    const mid = (s.x0 + s.x1) / 2;
+    const vis = clamp((head - s.x0) / Math.max(0.001, s.x1 - s.x0));
+    if (vis <= 0) return;
+    const x = TL.x + TL.w * s.x0;
+    const w = TL.w * (s.x1 - s.x0) * vis;
+    const exitP = easeInCubic(prog(t, 6.2 + mid * 0.35, 6.55 + mid * 0.35));
+    const hh = TL.h * (1 - exitP);
+    const pop = easeOutBack(prog(t, 3.0 + s.x0 * 2.6, 3.25 + s.x0 * 2.6), 3);
+    ctx.fillStyle = CAT[s.cat].color;
+    ctx.globalAlpha = 1 - exitP;
+    const hp = hh * lerp(0.6, 1, pop);
+    rrect(x + 2, TL.y + (TL.h - hp) / 2, Math.max(0, w - 4), hp, 8);
+    ctx.fill();
+  });
+  ctx.restore();
+
+  // AFK row
+  ctx.save();
+  const ay = TL.y + TL.h + 40;
+  rrect(TL.x, ay, TL.w, 36, 12);
+  ctx.clip();
+  ctx.globalAlpha = 1 - out;
+  ctx.fillStyle = C.accent + 'aa';
+  ctx.fillRect(TL.x, ay, TL.w * head, 36);
+  ctx.fillStyle = '#1a222d';
+  for (const [a, b] of AFK) {
+    if (head > a) ctx.fillRect(TL.x + TL.w * a, ay, TL.w * (Math.min(head, b) - a), 36);
+  }
+  ctx.restore();
+
+  // playhead
+  if (head > 0 && head < 1) {
+    const px = TL.x + TL.w * head;
+    ctx.save();
+    const g = ctx.createLinearGradient(px - 160, 0, px, 0);
+    g.addColorStop(0, 'rgba(255,255,255,0)');
+    g.addColorStop(1, 'rgba(255,255,255,0.18)');
+    ctx.fillStyle = g;
+    ctx.fillRect(px - 160, TL.y - 30, 160, TL.h + 116);
+    ctx.fillStyle = C.text;
+    ctx.fillRect(px - 2, TL.y - 30, 4, TL.h + 116);
+    ctx.beginPath();
+    ctx.arc(px, TL.y - 30, 9, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // impact flashes where chips land
+  for (const c of CHIPS) {
+    const land = 3.0 + c.delay * 0.3;
+    const p = prog(t, land, land + 0.45);
+    if (p <= 0 || p >= 1) continue;
+    ctx.save();
+    ctx.globalAlpha = 1 - p;
+    ctx.strokeStyle = CAT[c.cat].color;
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(c.tx, c.ty, 20 + easeOutCubic(p) * 90, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+// Particles from timeline to donut (6.2 – 7.3)
+const DONUT = { x: 620, y: 600, r: 230, th: 64 };
+const PARTS = (() => {
+  const r = rng(99);
+  const arr = [];
+  SEGMENTS.forEach(s => {
+    for (let k = 0; k < 7; k++) {
+      const u = lerp(s.x0, s.x1, r());
+      arr.push({ cat: s.cat, sx: TL.x + TL.w * u, sy: TL.y + TL.h * r(), u, j: r(), a: r() * Math.PI * 2 });
+    }
+  });
+  return arr;
+})();
+// start angle for each category on donut
+const CAT_ANG = (() => {
+  let a = -Math.PI / 2; const out = {};
+  for (const c of CATS) { const span = c.mins / TOTAL * Math.PI * 2; out[c.key] = [a, a + span]; a += span; }
+  return out;
+})();
+
+function particles(t) {
+  for (const p of PARTS) {
+    const t0 = 6.2 + p.u * 0.35;
+    const q = prog(t, t0, t0 + 0.75 + p.j * 0.25);
+    if (q <= 0 || q >= 1) continue;
+    const e = easeInOutCubic(q);
+    const [a0, a1] = CAT_ANG[p.cat];
+    const ang = lerp(a0, a1, p.j);
+    const tx = DONUT.x + Math.cos(ang) * DONUT.r, ty = DONUT.y + Math.sin(ang) * DONUT.r;
+    const cx = lerp(p.sx, tx, 0.5) + Math.cos(p.a) * 180, cy = Math.min(p.sy, ty) - 220 - p.j * 120;
+    const x = (1 - e) * (1 - e) * p.sx + 2 * (1 - e) * e * cx + e * e * tx;
+    const y = (1 - e) * (1 - e) * p.sy + 2 * (1 - e) * e * cy + e * e * ty;
+    ctx.save();
+    ctx.fillStyle = CAT[p.cat].color;
+    ctx.globalAlpha = Math.sin(q * Math.PI) * 0.95 + 0.05;
+    ctx.beginPath();
+    ctx.arc(x, y, 7 * (1 - q * 0.6), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+// Scene 3 (6.5 – 9.9): donut + category bars
+function scene3(t) {
+  if (t < 6.4 || t > 10.4) return;
+  const out = easeInCubic(prog(t, 9.55, 10.1));
+  ctx.save();
+  // zoom-out & slide as we leave
+  ctx.globalAlpha = 1 - out;
+  ctx.translate(W / 2, H / 2);
+  ctx.scale(1 - out * 0.15, 1 - out * 0.15);
+  ctx.translate(-W / 2, -H / 2);
+
+  revealText('See where your time', W / 2, 190, 84, C.text, prog(t, 6.5, 7.1));
+  revealText('really goes.', W / 2, 290, 84, C.accent, prog(t, 6.75, 7.35));
+
+  // donut sweeps
+  const spin = (1 - easeOutCubic(prog(t, 6.7, 8.2))) * -0.9;
+  CATS.forEach((c, i) => {
+    const [a0, a1] = CAT_ANG[c.key];
+    const p = easeOutExpo(prog(t, 6.75 + i * 0.12, 7.6 + i * 0.12));
+    if (p <= 0) return;
+    ctx.beginPath();
+    ctx.arc(DONUT.x, DONUT.y, DONUT.r, a0 + spin + 0.02, lerp(a0 + 0.02, a1 - 0.02, p) + spin);
+    ctx.lineWidth = DONUT.th * lerp(0.4, 1, p);
+    ctx.strokeStyle = c.color;
+    ctx.lineCap = 'butt';
+    ctx.stroke();
+  });
+  // center stat
+  const cnt = easeOutCubic(prog(t, 6.9, 8.4));
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.font = `800 74px ${SANS}`;
+  ctx.fillStyle = C.text;
+  ctx.globalAlpha = (1 - out) * clamp(prog(t, 6.9, 7.2));
+  ctx.fillText(fmtDur(TOTAL * cnt), DONUT.x, DONUT.y + 18);
+  ctx.font = `600 28px ${SANS}`;
+  ctx.fillStyle = C.dim;
+  ctx.fillText('tracked today', DONUT.x, DONUT.y + 64);
+  ctx.globalAlpha = 1 - out;
+
+  // bars
+  const bx = 1010, bw = 700, by0 = 440, gap = 108;
+  const maxM = CATS[0].mins;
+  CATS.forEach((c, i) => {
+    const y = by0 + i * gap;
+    const pin = prog(t, 7.0 + i * 0.1, 7.5 + i * 0.1);
+    if (pin <= 0) return;
+    const e = easeOutExpo(pin);
+    const slide = (1 - e) * 80;
+    ctx.save();
+    ctx.globalAlpha = (1 - out) * clamp(pin * 2);
+    ctx.translate(slide, 0);
+    ctx.font = `700 32px ${SANS}`;
+    ctx.textAlign = 'left';
+    ctx.fillStyle = C.text;
+    ctx.fillText(c.name, bx, y);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = C.dim;
+    const grow = easeOutCubic(prog(t, 7.15 + i * 0.1, 8.4 + i * 0.1));
+    ctx.fillText(fmtDur(c.mins * grow), bx + bw, y);
+    rrect(bx, y + 18, bw, 24, 12);
+    ctx.fillStyle = 'rgba(255,255,255,0.06)';
+    ctx.fill();
+    rrect(bx, y + 18, Math.max(24, bw * c.mins / maxM * grow), 24, 12);
+    ctx.fillStyle = c.color;
+    ctx.fill();
+    ctx.restore();
+  });
+  ctx.restore();
+}
+
+// Scene 4 (9.8 – 12.6): local-first privacy
+function scene4(t) {
+  if (t < 9.7 || t > 12.9) return;
+  const out = easeInCubic(prog(t, 12.2, 12.6));
+  const cx = W / 2, cy = 520;
+  ctx.save();
+  ctx.globalAlpha = 1 - out;
+  ctx.translate(cx, cy);
+  const sc = 0.9 + easeOutCubic(prog(t, 9.7, 10.6)) * 0.1 + out * 0.5;
+  ctx.scale(sc, sc);
+  ctx.translate(-cx, -cy);
+
+  // laptop with mini dashboard inside
+  const lp = easeInOutCubic(prog(t, 9.75, 10.5));
+  const lw = 560;
+  const lh = laptop(cx, cy, lw, lp, C.text);
+  const inner = easeOutCubic(prog(t, 10.2, 10.8));
+  if (inner > 0) {
+    ctx.save();
+    ctx.globalAlpha *= inner;
+    // mini donut
+    CATS.forEach(c => {
+      const [a0, a1] = CAT_ANG[c.key];
+      ctx.beginPath();
+      ctx.arc(cx - 130, cy, 80 * inner, a0 + 0.03, a1 - 0.03);
+      ctx.lineWidth = 26;
+      ctx.strokeStyle = c.color;
+      ctx.stroke();
+    });
+    // mini bars
+    CATS.forEach((c, i) => {
+      rrect(cx + 10, cy - 88 + i * 38, 190 * c.mins / CATS[0].mins * inner, 18, 9);
+      ctx.fillStyle = c.color;
+      ctx.fill();
+    });
+    ctx.restore();
+  }
+
+  // data trying to leave -> blocked
+  const cloudA = easeOutCubic(prog(t, 10.4, 10.8));
+  const cxl = cx + 520, cyl = cy - 200;
+  cloudIcon(cxl, cyl, 1.3, cloudA * 0.9);
+  const dashP = prog(t, 10.5, 11.1);
+  if (dashP > 0) {
+    ctx.save();
+    ctx.setLineDash([4, 22]);
+    ctx.lineDashOffset = -t * 120;
+    ctx.lineCap = 'round';
+    ctx.lineWidth = 8;
+    ctx.strokeStyle = C.dim;
+    const sx = cx + lw / 2 + 20, sy = cy - 100;
+    const ex = cxl - 110, ey = cyl + 20;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(lerp(sx, ex, easeOutCubic(dashP)), lerp(sy, ey, easeOutCubic(dashP)));
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // red X
+    const xp = easeOutBack(prog(t, 11.0, 11.35), 3);
+    if (xp > 0) {
+      const mx = lerp(sx, ex, 0.5), my = lerp(sy, ey, 0.5);
+      ctx.translate(mx, my);
+      ctx.scale(xp, xp);
+      ctx.beginPath(); ctx.arc(0, 0, 42, 0, Math.PI * 2); ctx.fillStyle = C.media; ctx.fill();
+      ctx.strokeStyle = C.bg; ctx.lineWidth = 10;
+      ctx.beginPath(); ctx.moveTo(-15, -15); ctx.lineTo(15, 15); ctx.moveTo(15, -15); ctx.lineTo(-15, 15); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // lock slams onto the laptop
+  const lk = prog(t, 10.9, 11.3);
+  lockIcon(cx - lw / 2 - 20, cy + lh / 2 - 10, 110, lk, easeOutCubic(prog(t, 11.3, 11.5)));
+  // shockwave when lock closes
+  const sw = prog(t, 11.45, 12.0);
+  if (sw > 0 && sw < 1) {
+    ctx.save();
+    ctx.globalAlpha *= 1 - sw;
+    ctx.strokeStyle = C.accent;
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.arc(cx - lw / 2 - 20, cy + lh / 2 + 10, 60 + easeOutCubic(sw) * 150, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+  ctx.restore();
+
+  // copy (not scaled)
+  ctx.save();
+  ctx.globalAlpha = 1 - out;
+  revealText('Private by design.', W / 2, 150, 84, C.text, prog(t, 9.9, 10.5));
+  revealText('Your data never leaves your device.', W / 2, 890, 50, C.accent, prog(t, 11.2, 11.8), { weight: 700 });
+  const tags = ['Windows', 'macOS', 'Linux', 'Android'];
+  let tx = W / 2 - 3 * 190 / 2 * 1.0 - 95;
+  tags.forEach((tag, i) => {
+    const p = prog(t, 11.5 + i * 0.08, 11.9 + i * 0.08);
+    if (p > 0) chip(W / 2 + (i - 1.5) * 220, 985, tag, C.accent, easeOutBack(p, 2.5) * 0.85, 1, { size: 26 });
+  });
+  ctx.restore();
+}
+
+// Scene 5 (12.4 – 15): logo reveal + CTA
+function scene5(t) {
+  if (t < 12.3) return;
+  // accent wipe
+  const wp = prog(t, 12.3, 12.85);
+  if (wp > 0 && wp < 1) {
+    ctx.save();
+    const r = easeInOutCubic(wp) * 1300;
+    const r2 = easeInCubic(prog(t, 12.55, 12.95)) * 1300;
+    ctx.beginPath();
+    ctx.arc(W / 2, H / 2, r, 0, Math.PI * 2);
+    ctx.arc(W / 2, H / 2, r2, 0, Math.PI * 2, true);
+    ctx.fillStyle = C.accent;
+    ctx.fill();
+    ctx.restore();
+  }
+  const t0 = 12.6;
+  const zoom = 1 + (t - t0) * 0.012;
+  ctx.save();
+  ctx.translate(W / 2, H / 2);
+  ctx.scale(zoom, zoom);
+  ctx.translate(-W / 2, -H / 2);
+
+  // logo slides left once drawn, making room for wordmark
+  const slide = easeInOutCubic(prog(t, 13.5, 14.1));
+  const lx = lerp(W / 2, 560, slide), ly = H / 2 - 20;
+  // soft glow behind logo
+  const gp = prog(t, 12.7, 13.6);
+  if (gp > 0) {
+    const g = ctx.createRadialGradient(lx, ly, 0, lx, ly, 420);
+    g.addColorStop(0, `rgba(46,230,166,${0.18 * gp})`);
+    g.addColorStop(1, 'rgba(46,230,166,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+  }
+  drawLogo(lx, ly, lerp(210, 170, slide), t0, t);
+
+  // wordmark
+  if (t > 13.7) {
+    staggerText('ActivityWatch', 790, H / 2 + 10, 132, C.text, 13.75, t, { font: ROUND, weight: 400, step: 0.03, dur: 0.45 });
+    revealText('Free & open-source time tracking', 796, H / 2 + 92, 44, C.dim, prog(t, 13.95, 14.4), { align: 'left', weight: 600 });
+    const up = prog(t, 14.05, 14.45);
+    if (up > 0) {
+      ctx.save();
+      ctx.globalAlpha = clamp(up * 2);
+      ctx.font = `700 40px ${SANS}`;
+      const label = 'activitywatch.net';
+      const tw = ctx.measureText(label).width;
+      const e = easeOutBack(up, 2);
+      const bxx = 796, byy = H / 2 + 130;
+      rrect(bxx, byy + (1 - e) * 20, (tw + 64) * e, 70, 35);
+      ctx.fillStyle = C.accent;
+      ctx.fill();
+      ctx.fillStyle = C.bg;
+      ctx.textBaseline = 'middle';
+      ctx.globalAlpha *= clamp((up - 0.4) * 3);
+      ctx.fillText(label, bxx + 32, byy + 37 + (1 - e) * 20);
+      ctx.restore();
+    }
+  }
+  ctx.restore();
+}
+
+// camera shake impulses (time, strength)
+const IMPACTS = [[3.1, 10], [11.35, 14], [12.85, 8]];
+function render(t) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+  background(t);
+  const [dx, dy] = shake(t, IMPACTS);
+  ctx.save();
+  ctx.translate(dx, dy);
+  scene1(t);
+  scene2(t);
+  chips(t);
+  particles(t);
+  scene3(t);
+  scene4(t);
+  scene5(t);
+  ctx.restore();
+  finish(t);
+}
+
+start(render, DURATION, ['800 40px Inter', '400 40px "Varela Round"', '600 40px Inter', '700 40px Inter']);
+</script>
+</body>
+</html>
